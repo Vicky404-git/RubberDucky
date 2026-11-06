@@ -1,0 +1,27 @@
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+
+# Audio / Media (Don't commit temporary recordings)
+*.wav
+*.mp3
+*.flac
+output.wav
+recording.wav
+
+# IDEs
+.vscode/
+.idea/
+
+# OS generated files
+.DS_Store
