@@ -1,17 +1,29 @@
-
 import os
 import re
-from laya import Router
+import time
 
+# Set this BEFORE importing LAYA / Hugging Face components.
 os.environ["HF_HUB_OFFLINE"] = "1"
 
-print("⏳ Loading LAYA Triage Engine (Offline Cache)...")
-router = Router(preload=True, device="cpu")
+_router = None
+
+
+def get_router():
+    """Load LAYA once, only when keyword routing cannot classify the issue."""
+    global _router
+
+    if _router is None:
+        from laya import Router
+
+        print("⏳ Loading LAYA (first use)...")
+        start = time.perf_counter()
+        _router = Router(preload=True, device="cpu")
+        print(f"[TIMING] LAYA preload: {time.perf_counter() - start:.2f}s")
+
+    return _router
 
 
 def detect_category(transcript: str) -> str | None:
-    """Route obvious incidents before invoking the ML classifier."""
-
     text = transcript.lower()
 
     patterns = {
@@ -19,11 +31,14 @@ def detect_category(transcript: str) -> str | None:
             r"\bdocker\b|\bcontainer\b|\bcontainers\b|\bport\b|"
             r"\bserver\b|\bdatabase\b|\bconnection\b|\bnetwork\b|"
             r"\bnginx\b|\bredis\b|\bpostgres\b|\bmysql\b|"
-            r"डॉकर|कंटेनर|सर्वर|पोर्ट|डेटाबेस"
+            r"डॉकर|कंटेनर|सर्वर|पोर्ट|डेटाबेस|नेटवर्क"
         ),
         "git_issue": (
             r"\bgit\b|\bmerge conflict\b|\bcommit\b|\bbranch\b|"
-            r"\brebase\b|\bpush\b|\bpull\b|\bcheckout\b"
+            r"\brebase\b|\bpush\b|\bpull\b|\bcheckout\b|"
+            r"\bdiff\b|\bdifferences\b|"
+            r"गिट|गिट डिफ|गेट डिफ|डिफरेंस|डिफरेंसेस|"
+            r"कमिट|ब्रांच|मर्ज|पुश|पुल|चेकआउट"
         ),
         "syntax_error": (
             r"\bsyntax error\b|\bsyntax\b|\bindentation error\b|"
@@ -43,15 +58,13 @@ def detect_category(transcript: str) -> str | None:
 
 
 def triage_incident(transcript: str, git_diff: str = "") -> dict:
-    """Classify an incident using deterministic routing and LAYA fallback."""
-
-    print("🧠 LAYA classifying incident...")
+    print("🧠 Running incident triage...")
 
     category = detect_category(transcript)
 
+    # Fast path: no LAYA import, loading, or inference.
     if category:
         print(f"⚡ Direct routing: {category}")
-
         return {
             "answers": {
                 "issue_category": {
@@ -66,6 +79,7 @@ def triage_incident(transcript: str, git_diff: str = "") -> dict:
             }
         }
 
+    # Slow path: only ambiguous/unmatched speech reaches LAYA.
     state = {
         "transcript": transcript,
         "git_diff_snippet": git_diff[:500] if git_diff else "None",
@@ -74,19 +88,27 @@ def triage_incident(transcript: str, git_diff: str = "") -> dict:
     questions = {
         "issue_category": {
             "type": "choice",
-            "instructions": "Classify the user's spoken developer issue. Prioritize the transcript over git changes.",
+            "instructions": (
+                "Classify the spoken developer issue. "
+                "Prioritize the transcript over Git changes."
+            ),
             "criteria": {
                 "syntax_error": "Syntax, indentation, or parsing errors.",
-                "infrastructure": "Docker, containers, databases, ports, or server issues.",
-                "logic_bug": "Incorrect output or unexpected program behavior.",
+                "infrastructure": "Docker, containers, databases, ports, or servers.",
+                "logic_bug": "Incorrect output or unexpected behavior.",
                 "git_issue": "Git branches, commits, merges, or repository problems.",
             },
         },
         "requires_logs": {
             "type": "noul",
-            "instructions": "Does diagnosing this issue require server or application logs?",
+            "instructions": "Are server or application logs needed to diagnose this issue?",
         },
     }
 
-    return router.predict(state, questions)
+    router = get_router()
 
+    start = time.perf_counter()
+    result = router.predict(state, questions)
+    print(f"[TIMING] LAYA inference: {time.perf_counter() - start:.2f}s")
+
+    return result
