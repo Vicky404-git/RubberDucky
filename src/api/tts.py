@@ -2,6 +2,7 @@
 import os
 import wave
 import requests
+from core.config import load_config
 
 
 TTS_URL = "https://api.vachana.ai/api/v1/tts/inference"
@@ -10,9 +11,11 @@ TTS_URL = "https://api.vachana.ai/api/v1/tts/inference"
 def synthesize_audio(
     text: str,
     output_path: str = "output.wav",
+    language: str | None = None,
 ) -> bool:
     """Generate speech using Gnani Timbre and save it as WAV."""
 
+    language = language or load_config().voice.language
     api_key = os.getenv("GNANI_API")
 
     if not api_key:
@@ -32,7 +35,7 @@ def synthesize_audio(
         "text": text.strip(),
         "voice": "Nalini",
         "model": "timbre-v2.5",
-        "language": "hi-IN",
+        "language": language,
         "speed": 1.0,
         "audio_config": {
             "sample_rate": 48000,

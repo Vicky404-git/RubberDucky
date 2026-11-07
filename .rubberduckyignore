@@ -1,0 +1,29 @@
+# RubberDucky-only exclusions: never send these paths to the AI.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa*
+credentials*
+secrets*
+
+# Local runtime artifacts
+*.wav
+*.mp3
+*.flac
+temp_*
+output.*
+recording.*
+debug.log
+
+# Generated environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+node_modules/
+dist/
+build/

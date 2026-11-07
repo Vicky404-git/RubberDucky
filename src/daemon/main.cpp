@@ -14,10 +14,63 @@
 #include <sys/types.h>
 #include <cerrno>
 #include <cstring>
+#include <fstream>
+#include <sstream>
+#include <algorithm>
+#include <cctype>
 
 namespace fs = std::filesystem;
 
 bool grab_failed = false;
+
+std::string trim(std::string value) {
+    const auto first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    const auto last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
+
+std::string read_ini_value(const fs::path& file, const std::string& section,
+                           const std::string& key, const std::string& fallback) {
+    std::ifstream input(file);
+    if (!input) return fallback;
+    std::string line;
+    std::string active_section;
+    while (std::getline(input, line)) {
+        line = trim(line);
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            active_section = trim(line.substr(1, line.size() - 2));
+            continue;
+        }
+        if (active_section != section) continue;
+        const auto equals = line.find('=');
+        if (equals == std::string::npos) continue;
+        if (trim(line.substr(0, equals)) == key)
+            return trim(line.substr(equals + 1));
+    }
+    return fallback;
+}
+
+unsigned int parse_modifiers(const std::string& value) {
+    unsigned int result = 0;
+    std::stringstream stream(value);
+    std::string token;
+    while (std::getline(stream, token, '+')) {
+        token = trim(token);
+        std::transform(token.begin(), token.end(), token.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (token == "mod1" || token == "alt") result |= Mod1Mask;
+        else if (token == "mod2") result |= Mod2Mask;
+        else if (token == "mod3") result |= Mod3Mask;
+        else if (token == "mod4" || token == "super" || token == "win") result |= Mod4Mask;
+        else if (token == "mod5") result |= Mod5Mask;
+        else if (token == "ctrl" || token == "control") result |= ControlMask;
+        else if (token == "shift") result |= ShiftMask;
+    }
+    return result;
+}
+
 
 int x_error_handler(Display*, XErrorEvent* event) {
     if (event->error_code == BadAccess) {
@@ -166,12 +219,16 @@ int main() {
 
     Window root = DefaultRootWindow(display);
 
-    const unsigned int modifiers = Mod4Mask | Mod1Mask;
+    const fs::path config_file = project_path / "rubberducky.ini";
+    const std::string hotkey_name = read_ini_value(config_file, "hotkey", "key", "v");
+    const std::string modifier_names = read_ini_value(config_file, "hotkey", "modifiers", "Mod4+Alt");
+    const unsigned int modifiers = parse_modifiers(modifier_names);
+    const KeySym hotkey_symbol = XStringToKeysym(hotkey_name.c_str());
+    KeyCode hotkey_key = XKeysymToKeycode(display, hotkey_symbol);
 
-    KeyCode v_key = XKeysymToKeycode(display, XK_v);
-
-    if (v_key == 0) {
-        std::cerr << "Could not resolve V keycode." << std::endl;
+    if (hotkey_symbol == NoSymbol || hotkey_key == 0 || modifiers == 0) {
+        std::cerr << "Invalid hotkey in rubberducky.ini: "
+                  << modifier_names << "+" << hotkey_name << std::endl;
         XCloseDisplay(display);
         return 1;
     }
@@ -198,7 +255,7 @@ int main() {
     for (unsigned int lock_mask : lock_masks) {
         XGrabKey(
             display,
-            v_key,
+            hotkey_key,
             modifiers | lock_mask,
             root,
             True,
@@ -211,7 +268,7 @@ int main() {
 
     if (grab_failed) {
         std::cerr << "Hotkey registration failed. "
-                  << "Another application may own Win + Alt + V."
+                  << "Another application may own the configured hotkey."
                   << std::endl;
 
         XCloseDisplay(display);
@@ -222,7 +279,7 @@ int main() {
 
     std::cout
         << "🦆 RubberDucky daemon active.\n"
-        << "Listening for Win + Alt + V..."
+        << "Listening for " << modifier_names << "+" << hotkey_name << "..."
         << std::endl;
 
     XEvent event;
@@ -234,7 +291,7 @@ int main() {
             continue;
         }
 
-        if (event.xkey.keycode != v_key) {
+        if (event.xkey.keycode != hotkey_key) {
             continue;
         }
 

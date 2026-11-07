@@ -29,3 +29,5 @@ temp_output.wav
 
 # OS generated files
 .DS_Store
+src.backup/
+/ducky-daemon

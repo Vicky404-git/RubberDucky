@@ -1,13 +1,15 @@
 import os
 from gnani.stt import GnaniSTTClient
+from core.config import load_config
 
 
 class STTError(Exception):
     """Raised when Prisma transcription cannot be completed."""
 
 
-def transcribe_audio(file_path: str, language: str = "hi-IN") -> str:
+def transcribe_audio(file_path: str, language: str | None = None) -> str:
     """Transcribe a WAV file using Gnani Prisma."""
+    language = language or load_config().voice.language
 
     api_key = os.getenv("GNANI_API")
 
