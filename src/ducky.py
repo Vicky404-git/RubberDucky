@@ -10,6 +10,7 @@ from api.stt import transcribe_audio
 from api.tts import synthesize_audio
 from core.context import get_git_diff, get_docker_logs
 from core.parser import analyze_incident
+from core.triage import triage_incident
 
 def record_audio(output_file: str, duration: int = 5):
     """A quick helper to record audio from the terminal using ALSA/arecord (Linux)."""
@@ -31,7 +32,7 @@ def record_audio(output_file: str, duration: int = 5):
         return False
 
 def main():
-    # Load the .env file so the Gnani and Groq SDKs can find their keys
+    # Load the .env file so the Gnani and OpenRouter SDKs can find their keys
     load_dotenv()
     
     print("🦆 RubberDucky initializing...")
@@ -46,25 +47,39 @@ def main():
     transcript = transcribe_audio(audio_file)
     print(f"\n💬 You said: '{transcript}'")
 
-    # 3. Gather System Context (The "Glue")
-    print("\n🔍 Gathering System Context...")
+    # 2.5. Gather Git Context Early for LAYA
     git_diff = get_git_diff()
-    print("--- Git Diff Snapshot ---")
     
+    # 3. Triage the Incident instantly with LAYA
+    print("\n⚡ Running LAYA Triage...")
+    triage_result = triage_incident(transcript, git_diff)
+    category = triage_result.get("issue_category", {}).get("decision", "unknown")
+    needs_logs = triage_result.get("requires_logs", {}).get("decision", False)
+    
+    print(f"LAYA classified this as: {category.upper()}")
+    
+    # 4. Gather Remaining System Context (The "Glue")
+    print("\n🔍 Gathering System Context...")
+    print("--- Git Diff Snapshot ---")
     if git_diff and git_diff != "No uncommitted changes.":
         print("\n".join(git_diff.split("\n")[:10]) + "\n...[truncated]")
     else:
         print(git_diff)
+        
+    docker_logs = ""
+    if needs_logs:
+        print("LAYA determined we need logs. Fetching Docker logs...")
+        # docker_logs = get_docker_logs("my_backend_container")
 
-    # 4. Analyze the Incident with the LLM Brain
+    # 5. Analyze the Incident with the LLM Brain
     print("\n🧠 LLM Parsing Incident...")
-    analysis = analyze_incident(transcript, git_diff=git_diff)
+    analysis = analyze_incident(transcript, git_diff=git_diff, docker_logs=docker_logs)
     
     print("\n📝 --- INCIDENT DIAGNOSIS ---")
     print(analysis.get("diagnosis", "No diagnosis generated."))
     print("------------------------------")
     
-    # 5. Speak the Solution using Gnani Timbre
+    # 6. Speak the Solution using Gnani Timbre
     tts_response = analysis.get("tts_response", "Bhai, kuch samajh nahi aaya.")
     print(f"\n🗣️ Speaking response: '{tts_response}'")
     
