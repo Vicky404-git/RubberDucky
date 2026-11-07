@@ -3,6 +3,7 @@
 #include <X11/keysym.h>
 #include <iostream>
 #include <cstdlib>
+#include <string>
 
 int main() {
     Display* display = XOpenDisplay(NULL);
@@ -12,21 +13,21 @@ int main() {
     }
 
     Window root = DefaultRootWindow(display);
-
-    // Mod4Mask = Super/Win Key
-    // Mod1Mask = Alt Key
     unsigned int modifiers = Mod4Mask | Mod1Mask;
     KeyCode v_key = XKeysymToKeycode(display, XK_v);
 
-    // Grab the key combinations (including NumLock and CapsLock states)
     XGrabKey(display, v_key, modifiers, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(display, v_key, modifiers | Mod2Mask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(display, v_key, modifiers | LockMask, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(display, v_key, modifiers | Mod2Mask | LockMask, root, True, GrabModeAsync, GrabModeAsync);
 
     XSelectInput(display, root, KeyPressMask);
-
     std::cout << "🦆 RubberDucky Daemon active. Listening for Win + Alt + V..." << std::endl;
+
+    // Dynamically resolve the project path relative to HOME
+    const char* homeDir = getenv("HOME");
+    std::string projectPath = std::string(homeDir) + "/Desktop/Projects/RubberDucky";
+    std::string command = "cd " + projectPath + " && " + projectPath + "/.venv/bin/python src/ducky.py";
 
     XEvent event;
     while (true) {
@@ -35,9 +36,7 @@ int main() {
             if (event.xkey.keycode == v_key) {
                 std::cout << "\n[!] Hotkey detected! Waking up RubberDucky..." << std::endl;
                 
-                // IMPORTANT: Ensure this path matches exactly where your project is
-                int result = system("cd /home/vicky-404/Desktop/Projects/RubberDucky && /home/vicky-404/Desktop/Projects/RubberDucky/.venv/bin/python src/ducky.py");
-                
+                int result = system(command.c_str());
                 if (result != 0) {
                     std::cerr << "Pipeline error code: " << result << std::endl;
                 }

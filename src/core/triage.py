@@ -1,42 +1,92 @@
+
 import os
+import re
 from laya import Router
 
-# Force LAYA to use the cached model and skip the network check
 os.environ["HF_HUB_OFFLINE"] = "1"
 
 print("⏳ Loading LAYA Triage Engine (Offline Cache)...")
-# Initialize silently without the progress bars
 router = Router(preload=True, device="cpu")
 
-def triage_incident(transcript: str, git_diff: str = "") -> dict:
-    """Uses LAYA to instantly classify the type of incident."""
-    
-    # The state is the context LAYA will read
-    state = {
-        "transcript": transcript,
-        "git_diff_snippet": git_diff[:500] if git_diff else "None"
+
+def detect_category(transcript: str) -> str | None:
+    """Route obvious incidents before invoking the ML classifier."""
+
+    text = transcript.lower()
+
+    patterns = {
+        "infrastructure": (
+            r"\bdocker\b|\bcontainer\b|\bcontainers\b|\bport\b|"
+            r"\bserver\b|\bdatabase\b|\bconnection\b|\bnetwork\b|"
+            r"\bnginx\b|\bredis\b|\bpostgres\b|\bmysql\b|"
+            r"डॉकर|कंटेनर|सर्वर|पोर्ट|डेटाबेस"
+        ),
+        "git_issue": (
+            r"\bgit\b|\bmerge conflict\b|\bcommit\b|\bbranch\b|"
+            r"\brebase\b|\bpush\b|\bpull\b|\bcheckout\b"
+        ),
+        "syntax_error": (
+            r"\bsyntax error\b|\bsyntax\b|\bindentation error\b|"
+            r"\bsyntaxerror\b|\bmissing parenthesis\b"
+        ),
+        "logic_bug": (
+            r"\bwrong output\b|\bincorrect output\b|\bwrong result\b|"
+            r"\blogic bug\b|\bunexpected behavior\b|\bnot working\b"
+        ),
     }
 
-    # The questions we want LAYA to answer deterministically
+    for category, pattern in patterns.items():
+        if re.search(pattern, text):
+            return category
+
+    return None
+
+
+def triage_incident(transcript: str, git_diff: str = "") -> dict:
+    """Classify an incident using deterministic routing and LAYA fallback."""
+
+    print("🧠 LAYA classifying incident...")
+
+    category = detect_category(transcript)
+
+    if category:
+        print(f"⚡ Direct routing: {category}")
+
+        return {
+            "answers": {
+                "issue_category": {
+                    "choice": category,
+                    "probabilities": {},
+                    "source": "keyword_router",
+                },
+                "requires_logs": {
+                    "noul": 1.0 if category == "infrastructure" else 0.0,
+                    "source": "keyword_router",
+                },
+            }
+        }
+
+    state = {
+        "transcript": transcript,
+        "git_diff_snippet": git_diff[:500] if git_diff else "None",
+    }
+
     questions = {
         "issue_category": {
             "type": "choice",
-            "instructions": "Based on the transcript and git diff, what kind of issue is the developer facing?",
+            "instructions": "Classify the user's spoken developer issue. Prioritize the transcript over git changes.",
             "criteria": {
-                "syntax_error": "Typos, missing parentheses, or basic code structure issues.",
-                "infrastructure": "Docker, database, ports, or server connection issues.",
-                "logic_bug": "The code runs but produces the wrong output or unexpected behavior.",
-                "git_issue": "Merge conflicts, commit issues, or branch problems."
-            }
+                "syntax_error": "Syntax, indentation, or parsing errors.",
+                "infrastructure": "Docker, containers, databases, ports, or server issues.",
+                "logic_bug": "Incorrect output or unexpected program behavior.",
+                "git_issue": "Git branches, commits, merges, or repository problems.",
+            },
         },
         "requires_logs": {
             "type": "noul",
-            "instructions": "Does this issue look like it requires server logs to diagnose properly?"
-        }
+            "instructions": "Does diagnosing this issue require server or application logs?",
+        },
     }
 
-    # Run the local inference
-    print("🧠 LAYA classifying incident...")
-    result = router.predict(state, questions)
-    
-    return result
+    return router.predict(state, questions)
+

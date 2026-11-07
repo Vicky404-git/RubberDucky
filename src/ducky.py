@@ -5,8 +5,8 @@ from dotenv import load_dotenv
 
 # Ensure we can import from the 'src' directory correctly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from api.stt import transcribe_audio, STTError
 
-from api.stt import transcribe_audio
 from api.tts import synthesize_audio
 from core.context import get_git_diff, get_docker_logs
 from core.parser import analyze_incident
@@ -44,19 +44,42 @@ def main():
 
     # 2. Transcribe to Hinglish using Gnani Prisma
     print("👂 Transcribing audio with Prisma...")
-    transcript = transcribe_audio(audio_file)
-    print(f"\n💬 You said: '{transcript}'")
+    try:
+        transcript = transcribe_audio(audio_file)
+    except STTError as exc:
+        print(f"\n❌ Speech recognition failed: {exc}")
 
+        if os.path.exists(audio_file):
+            os.remove(audio_file)
+
+        return
+
+    print(f"\n💬 You said: '{transcript}'")
+    
     # 2.5. Gather Git Context Early for LAYA
     git_diff = get_git_diff()
     
     # 3. Triage the Incident instantly with LAYA
     print("\n⚡ Running LAYA Triage...")
     triage_result = triage_incident(transcript, git_diff)
-    category = triage_result.get("issue_category", {}).get("decision", "unknown")
-    needs_logs = triage_result.get("requires_logs", {}).get("decision", False)
     
-    print(f"LAYA classified this as: {category.upper()}")
+
+    import pprint
+    print("\n[DEBUG] Raw LAYA Response:")
+    pprint.pp(triage_result)
+    
+
+    answers = triage_result.get("answers", {})
+
+    category = answers.get("issue_category", {}).get("choice", "unknown")
+    log_probability = answers.get("requires_logs", {}).get("noul", 0.0)
+
+    # Infrastructure requests need Docker/system context.
+    needs_logs = (
+        category == "infrastructure"
+        or log_probability >= 0.70
+    ) 
+    print(f"LAYA classified this as: {category.upper()} (Log Prob: {log_probability:.2f})")
     
     # 4. Gather Remaining System Context (The "Glue")
     print("\n🔍 Gathering System Context...")
@@ -66,14 +89,24 @@ def main():
     else:
         print(git_diff)
         
-    docker_logs = ""
-    if needs_logs:
-        print("LAYA determined we need logs. Fetching Docker logs...")
-        # docker_logs = get_docker_logs("my_backend_container")
+    docker_logs = None
+
+    if needs_logs and category == "infrastructure":
+        container_name = input("Docker container name: ").strip()
+
+        if container_name:
+            docker_logs = get_docker_logs(container_name)
+        else:
+            print("No container specified. Skipping Docker logs.")
 
     # 5. Analyze the Incident with the LLM Brain
     print("\n🧠 LLM Parsing Incident...")
-    analysis = analyze_incident(transcript, git_diff=git_diff, docker_logs=docker_logs)
+    analysis = analyze_incident(
+        transcript, 
+        git_diff=git_diff, 
+        docker_logs=docker_logs,
+        category=category
+     )
     
     print("\n📝 --- INCIDENT DIAGNOSIS ---")
     print(analysis.get("diagnosis", "No diagnosis generated."))
