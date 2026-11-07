@@ -18,6 +18,10 @@ __pycache__/
 *.flac
 output.wav
 recording.wav
+temp_input.wav
+temp_output.wav
+
+
 
 # IDEs
 .vscode/

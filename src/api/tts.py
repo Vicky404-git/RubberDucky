@@ -35,4 +35,4 @@ def synthesize_audio(text: str, output_path: str = "output.wav") -> bool:
         return True
     
     print(f"TTS Error: {response.status_code} - {response.text}")
-    return False(f"❌ Error {response.status_code}: {response.text}")
+    return False
