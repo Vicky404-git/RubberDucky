@@ -49,6 +49,13 @@ class HotkeyConfig:
 
 
 @dataclass(frozen=True)
+class LoggingConfig:
+    level: str = "INFO"
+    max_bytes: int = 1048576
+    backup_count: int = 3
+
+
+@dataclass(frozen=True)
 class AppConfig:
     project_root: Path
     config_path: Path
@@ -57,6 +64,7 @@ class AppConfig:
     triage: TriageConfig
     voice: VoiceConfig
     hotkey: HotkeyConfig
+    logging: LoggingConfig
 
 
 _cached_config: Optional[AppConfig] = None
@@ -134,6 +142,11 @@ def load_config(path: str | Path | None = None, *, reload: bool = False) -> AppC
             language=parser.get("voice", "language", fallback="hi-IN").strip() or "hi-IN",
         ),
         hotkey=HotkeyConfig(key=key, modifiers=modifiers),
+        logging=LoggingConfig(
+            level=parser.get("logging", "level", fallback="INFO").strip().upper(),
+            max_bytes=_bounded_int(parser, "logging", "max_bytes", 1048576, 65536, 10485760),
+            backup_count=_bounded_int(parser, "logging", "backup_count", 3, 1, 10),
+        ),
     )
     return _cached_config
 

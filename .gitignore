@@ -21,7 +21,10 @@ recording.wav
 temp_input.wav
 temp_output.wav
 
-
+# RubberDucky diagnostics
+debug.log
+debug.log.*
+src.phase12-backup/
 
 # IDEs
 .vscode/

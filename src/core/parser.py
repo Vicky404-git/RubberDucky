@@ -11,6 +11,8 @@ from openai import (
 
 from core.config import load_config
 from core.ignore import IgnoreManager
+from core.debuglog import log_event
+import time
 
 
 def fallback_response(diagnosis: str, spoken: str) -> dict:
@@ -80,10 +82,12 @@ Return ONLY valid JSON with exactly two string keys:
     user_prompt = (
         f"REQUEST:\n{safe_transcript}\n\n"
         f"CATEGORY HINT:\n{category}\n\n"
-        f"RECENT GIT COMMIT DIFFS:\n{safe_diff or 'Not supplied.'}\n\n"
+        f"GIT REPOSITORY CONTEXT (status, conflicts, staged/unstaged diffs, recent commits):\n{safe_diff or 'Not supplied.'}\n\n"
         f"DOCKER LOGS:\n{safe_logs or 'Not supplied.'}"
     )
 
+    started = time.perf_counter()
+    log_event("llm", "request_started")
     try:
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
@@ -103,22 +107,30 @@ Return ONLY valid JSON with exactly two string keys:
         )
         if not response.choices:
             raise ValueError("OpenRouter returned no choices.")
-        return validate_response(response.choices[0].message.content)
+        parsed = validate_response(response.choices[0].message.content)
+        log_event("llm", "request_succeeded", duration_ms=(time.perf_counter() - started) * 1000)
+        return parsed
     except RateLimitError:
+        log_event("llm", "rate_limited", level="warning", duration_ms=(time.perf_counter() - started) * 1000, code=429)
         print("OpenRouter rate limit reached (HTTP 429). Check the configured model/provider availability.")
         return fallback_response("OpenRouter rate limit reached.", "Bhai, AI provider abhi rate-limited hai. Thodi der baad try kar.")
     except APITimeoutError:
+        log_event("llm", "request_timeout", level="warning", duration_ms=(time.perf_counter() - started) * 1000)
         print("OpenRouter request timed out.")
         return fallback_response("OpenRouter request timed out.", "Bhai, AI response mein timeout aa gaya. Dobara try kar.")
     except APIConnectionError:
+        log_event("llm", "connection_error", level="error", duration_ms=(time.perf_counter() - started) * 1000)
         print("Could not connect to OpenRouter.")
         return fallback_response("Could not connect to OpenRouter.", "Bhai, OpenRouter se connection nahi ho pa raha hai.")
     except APIStatusError as exc:
+        log_event("llm", "http_error", level="error", duration_ms=(time.perf_counter() - started) * 1000, code=exc.status_code)
         print(f"OpenRouter HTTP error: {exc.status_code}")
         return fallback_response(f"OpenRouter returned HTTP {exc.status_code}.", "Bhai, OpenRouter service mein error aa gaya hai.")
     except (ValueError, json.JSONDecodeError) as exc:
+        log_event("llm", "invalid_response", level="warning", duration_ms=(time.perf_counter() - started) * 1000)
         print(f"Invalid OpenRouter response: {type(exc).__name__}")
         return fallback_response("The AI returned an invalid response.", "Bhai, AI ka response sahi format mein nahi aaya.")
     except Exception as exc:
+        log_event("llm", "unexpected_error", level="error", duration_ms=(time.perf_counter() - started) * 1000)
         print(f"Unexpected OpenRouter error: {type(exc).__name__}")
         return fallback_response("Unexpected error while analyzing the incident.", "Bhai, analysis ke dauran unexpected error aa gaya.")
