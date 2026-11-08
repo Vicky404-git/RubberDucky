@@ -1,19 +1,18 @@
 import os
-import sys
 import subprocess
+import sys
+import time
+
 from dotenv import load_dotenv
 
 # Support running as: .venv/bin/python src/ducky.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from api.stt import transcribe_audio, STTError
-from api.tts import synthesize_audio
+
+from api.stt import STTError, transcribe_audio
 from core.config import load_config
-from core.context import get_git_diff, get_docker_logs
-from core.ignore import IgnoreManager
-from core.parser import analyze_incident
-from core.triage import triage_incident
 from core.debuglog import log_event
-import time
+from core.ignore import IgnoreManager
+from core.pipeline import run_debug_pipeline
 
 
 def record_audio(output_file: str, duration: int = 5) -> bool:
@@ -43,6 +42,41 @@ def main():
 
     audio_file = "temp_input.wav"
     output_audio = "temp_output.wav"
+    git_text = ""
+
+    def on_event(event_type: str, payload: dict) -> None:
+        nonlocal git_text
+        if event_type == "git_context_collected":
+            git_text = str(payload.get("git_text", ""))
+        elif event_type == "triage_started":
+            print("\n⚡ Running LAYA Triage...")
+        elif event_type == "triage_completed":
+            category = str(payload.get("category", "unknown"))
+            probability = float(payload.get("log_probability", 0.0) or 0.0)
+            print(f"LAYA classified this as: {category.upper()} (Log Prob: {probability:.2f})")
+            print("\n🔍 Gathering System Context...")
+            print("--- Filtered Git Diff Snapshot ---")
+            if git_text:
+                print("\n".join(git_text.splitlines()[:10]) + "\n...[truncated]")
+            else:
+                print("No Git context available.")
+        elif event_type == "llm_started":
+            print("\n🧠 LLM Parsing Incident...")
+        elif event_type == "llm_completed":
+            print("\n📝 --- INCIDENT DIAGNOSIS ---")
+            print(payload.get("diagnosis", "No diagnosis generated."))
+            print("------------------------------")
+            print(f"\n🗣️ Speaking response: '{payload.get('spoken_response', '')}'")
+            log_event("app", "analysis_completed")
+        elif event_type == "llm_failed":
+            print(f"\n❌ AI diagnosis failed: {payload.get('message', 'Unknown error.')}")
+
+    def docker_container_provider() -> str | None:
+        container = input("Docker container name: ").strip()
+        if not container:
+            print("No container specified. Skipping Docker logs.")
+        return container or None
+
     try:
         stage_started = time.perf_counter()
         if not record_audio(audio_file, duration=config.voice.record_seconds):
@@ -63,56 +97,31 @@ def main():
         transcript = ignore_manager.sanitize_context(transcript)
         print(f"\n💬 You said: '{transcript}'")
 
-        stage_started = time.perf_counter()
-        git_diff = get_git_diff(repo_path=str(config.project_root))
-        log_event("git", "context_collected", duration_ms=(time.perf_counter() - stage_started) * 1000)
-        print("\n⚡ Running LAYA Triage...")
-        stage_started = time.perf_counter()
-        triage_result = triage_incident(transcript, git_diff)
-        log_event("triage", "completed", duration_ms=(time.perf_counter() - stage_started) * 1000)
-        answers = triage_result.get("answers", {})
-        category = answers.get("issue_category", {}).get("choice", "unknown")
-        log_probability = answers.get("requires_logs", {}).get("noul", 0.0)
-        needs_logs = category == "infrastructure" or log_probability >= 0.70
-        print(f"LAYA classified this as: {category.upper()} (Log Prob: {log_probability:.2f})")
-
-        print("\n🔍 Gathering System Context...")
-        print("--- Filtered Git Diff Snapshot ---")
-        print("\n".join(git_diff.splitlines()[:10]) + "\n...[truncated]" if git_diff else "No Git context available.")
-
-        docker_logs = None
-        if needs_logs and category == "infrastructure":
-            container_name = input("Docker container name: ").strip()
-            if container_name:
-                docker_logs = get_docker_logs(container_name)
-            else:
-                print("No container specified. Skipping Docker logs.")
-
-        print("\n🧠 LLM Parsing Incident...")
-        analysis = analyze_incident(
+        result = run_debug_pipeline(
             transcript,
-            git_diff=git_diff,
-            docker_logs=docker_logs,
-            category=category,
+            config=config,
+            repo_path=config.project_root,
+            docker_container_provider=docker_container_provider,
+            output_audio_path=output_audio,
+            on_event=on_event,
+            infrastructure_logs_only=True,
         )
-        log_event("app", "analysis_completed")
-        print("\n📝 --- INCIDENT DIAGNOSIS ---")
-        print(analysis.get("diagnosis", "No diagnosis generated."))
-        print("------------------------------")
 
-        tts_response = analysis.get("tts_response", "Bhai, kuch samajh nahi aaya.")
-        print(f"\n🗣️ Speaking response: '{tts_response}'")
-        stage_started = time.perf_counter()
-        if synthesize_audio(tts_response, output_path=output_audio, language=config.voice.language):
-            log_event("tts", "completed", duration_ms=(time.perf_counter() - stage_started) * 1000)
+        if result.error is not None:
+            log_event("app", "analysis_failed", level="warning", code=result.error.status_code)
+        elif result.audio_path is not None:
             print("🔊 Playing response...")
             try:
-                subprocess.run(["aplay", output_audio], check=True, stderr=subprocess.DEVNULL)
+                subprocess.run(
+                    ["aplay", str(result.audio_path)],
+                    check=True,
+                    stderr=subprocess.DEVNULL,
+                )
             except (subprocess.CalledProcessError, FileNotFoundError):
                 log_event("playback", "failed", level="warning")
                 print("Audio playback unavailable.")
-        else:
-            log_event("tts", "failed", level="warning", duration_ms=(time.perf_counter() - stage_started) * 1000)
+        elif result.tts_error:
+            log_event("tts", "failed", level="warning")
     except KeyboardInterrupt:
         log_event("app", "interrupted", level="warning")
         print("\nRubberDucky interrupted.")

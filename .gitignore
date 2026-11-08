@@ -34,3 +34,10 @@ src.phase12-backup/
 .DS_Store
 src.backup/
 /ducky-daemon
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/.vite/
+*.local

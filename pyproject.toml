@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "dotenv>=0.9.9",
+    "fastapi>=0.162.2",
     "gnani-vachana>=0.9.0",
     "langchain-groq>=1.1.3",
     "laya>=0.4.27",
@@ -13,4 +14,5 @@ dependencies = [
     "pathspec>=1.1.1",
     "pyaudio>=0.2.14",
     "requests>=2.34.2",
+    "uvicorn[standard]>=0.54.0",
 ]
