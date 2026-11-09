@@ -50,6 +50,79 @@ from server.models import (
 from server.session_runner import session_runner
 from server.session_store import session_store, state_dir
 
+import logging
+import subprocess
+
+logger = logging.getLogger(__name__)
+
+_managed_daemon: subprocess.Popen | None = None
+
+
+def _start_daemon() -> None:
+    """Start the X11 hotkey daemon if it is not already running."""
+    global _managed_daemon
+
+    if _daemon_running():
+        logger.info("RubberDucky daemon is already running.")
+        return
+
+    daemon_path = PROJECT_ROOT / "ducky-daemon"
+
+    if not daemon_path.is_file():
+        logger.warning("Daemon executable not found: %s", daemon_path)
+        return
+
+    if not os.access(daemon_path, os.X_OK):
+        logger.warning("Daemon executable is not executable: %s", daemon_path)
+        return
+
+    if not os.environ.get("DISPLAY"):
+        logger.warning(
+            "DISPLAY is not set. Cannot start the X11 hotkey daemon."
+        )
+        return
+
+    try:
+        _managed_daemon = subprocess.Popen(
+            [str(daemon_path)],
+            cwd=str(PROJECT_ROOT),
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+        )
+
+        logger.info(
+            "Started RubberDucky daemon (PID %s).",
+            _managed_daemon.pid,
+        )
+
+    except OSError:
+        _managed_daemon = None
+        logger.exception("Failed to start RubberDucky daemon.")
+
+
+def _stop_managed_daemon() -> None:
+    """Stop only the daemon instance started by this bridge."""
+    global _managed_daemon
+
+    process = _managed_daemon
+    _managed_daemon = None
+
+    if process is None or process.poll() is not None:
+        return
+
+    logger.info("Stopping managed RubberDucky daemon (PID %s).", process.pid)
+
+    try:
+        process.terminate()
+        process.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        logger.warning("Daemon did not stop gracefully; killing it.")
+        process.kill()
+        process.wait()
+    except OSError:
+        logger.exception("Error while stopping RubberDucky daemon.")
+
+
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 # Keep this in sync with the explicit origins accepted by the HTTP CORS
@@ -159,16 +232,27 @@ def _status_payload() -> dict:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     event_bus.bind_loop(asyncio.get_running_loop())
-    # Any session left mid-flight by a previous bridge process is not running.
+
+    # Recover sessions interrupted by a previous bridge process.
     for session in session_store.list(100):
         if session.status in {"listening", "processing"}:
             session.status = "failed"
             session.stage = "idle"
-            session.error = "The backend restarted before this session finished. Retry it."
+            session.error = (
+                "The backend restarted before this session finished. Retry it."
+            )
             session.retryable = True
             session.updated_at = __import__("time").time()
             session_store.upsert(session)
-    yield
+
+    # Automatically start the global X11 hotkey daemon.
+    _start_daemon()
+
+    try:
+        yield
+    finally:
+        # Never stop a daemon that was already running before this bridge.
+        _stop_managed_daemon()
 
 
 app = FastAPI(
