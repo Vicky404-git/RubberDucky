@@ -136,7 +136,7 @@ export function Overview() {
             />
 
             <div className="pointer-events-none absolute inset-x-0 top-6 flex flex-col items-center px-6 text-center">
-              <p className="text-[11px] uppercase tracking-[0.28em] text-zinc-500">
+              <p className="font-display text-[11px] uppercase tracking-[0.28em] text-zinc-500">
                 {orbState === "idle" ? "RubberDucky" : "Current state"}
               </p>
               <h2 className="mt-1.5 text-2xl font-semibold tracking-tight text-zinc-50 sm:text-3xl">

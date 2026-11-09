@@ -33,7 +33,9 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
       </div>
       {!compact ? (
         <div className="leading-tight">
-          <p className="text-sm font-semibold tracking-tight text-zinc-100">RubberDucky</p>
+          <p className="font-display text-sm font-semibold tracking-tight text-zinc-100">
+            RubberDucky
+          </p>
           <p className="text-[10px] uppercase tracking-[0.2em] text-zinc-600">Voice debugger</p>
         </div>
       ) : null}

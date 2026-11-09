@@ -42,3 +42,8 @@ frontend/dist/
 frontend/coverage/
 frontend/.vite/
 *.local
+
+# Font downloads (bundled copies live in frontend/public/fonts/)
+/robtronika-font.zip
+/Robtronika-*.ttf
+/RobtronikaItalic-*.ttf
