@@ -159,6 +159,19 @@ class IgnoreManager:
         """Redact likely credentials in logs/prompts even when no file path exists."""
         return self.redact_secrets(text or "")
 
+    def sensitive_findings(self, paths: Iterable[str], limit: int = 100) -> list[str]:
+        """Return paths matching built-in secret patterns, deduplicated."""
+        findings = [
+            path
+            for path in paths
+            if self._matches(
+                path.replace("\\", "/"),
+                list(DEFAULT_SENSITIVE_PATTERNS),
+                self._sensitive_spec,
+            )
+        ]
+        return sorted(dict.fromkeys(findings))[:limit]
+
     def suggest_patterns(self, paths: Iterable[str]) -> list[str]:
         """Generate deterministic suggestions; an LLM may add suggestions separately."""
         suggestions: set[str] = set()
