@@ -25,6 +25,7 @@ temp_output.wav
 debug.log
 debug.log.*
 src.phase12-backup/
+graphify-out/
 
 # IDEs
 .vscode/
