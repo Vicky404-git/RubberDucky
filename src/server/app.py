@@ -25,7 +25,8 @@ load_dotenv(PROJECT_ROOT / ".env")
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,9 +34,18 @@ from fastapi.staticfiles import StaticFiles
 from core.config import load_config, reset_config_cache
 from core.debuglog import log_event
 from core.ignore import DEFAULT_SENSITIVE_PATTERNS, IgnoreManager
+from core.providers import PROVIDERS
 from core.repository import collect_candidate_paths
 
 from server.config_writer import update_ini_values
+from server.connection_test import ConnectionTestError, run_connection_test
+from server.credential_store import (
+    CredentialError,
+    all_provider_metadata,
+    provider_metadata,
+    remove_credential,
+    save_credential,
+)
 from server.events import event_bus
 from server.git_service import build_git_context, current_branch
 from server.models import (
@@ -43,6 +53,12 @@ from server.models import (
     HealthResponse,
     IgnoreApplyRequest,
     PlaybackUpdate,
+    ProviderCredentialRequest,
+    ProviderCredentialResponse,
+    ProviderInfo,
+    ProviderTestRequest,
+    ProviderTestResult,
+    ProvidersResponse,
     SafeConfig,
     SessionRecord,
     StartSessionRequest,
@@ -123,6 +139,31 @@ def _stop_managed_daemon() -> None:
         logger.exception("Error while stopping RubberDucky daemon.")
 
 
+def _refresh_daemon_after_credentials_change() -> None:
+    """Refresh the bridge-owned daemon so it inherits updated API credentials.
+
+    A daemon started outside this FastAPI process is deliberately not killed:
+    its owner may be a user's session manager or terminal. In that case we
+    warn that a manual restart is required for the hotkey process to inherit
+    the newly saved environment.
+    """
+    global _managed_daemon
+
+    if _managed_daemon is not None:
+        _stop_managed_daemon()
+        _start_daemon()
+        return
+
+    if _daemon_running():
+        logger.warning(
+            "Provider credentials changed, but ducky-daemon is externally managed. "
+            "Restart that daemon manually so hotkey sessions inherit the new credentials."
+        )
+        return
+
+    _start_daemon()
+
+
 FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 # Keep this in sync with the explicit origins accepted by the HTTP CORS
@@ -164,6 +205,7 @@ def _safe_config() -> SafeConfig:
         llm={
             "provider": config.llm.provider,
             "model": config.llm.model,
+            "models": dict(config.llm.models),
             "temperature": config.llm.temperature,
             "max_tokens": config.llm.max_tokens,
             "timeout": config.llm.timeout,
@@ -221,6 +263,7 @@ def _status_payload() -> dict:
         "hotkey": {"key": config.hotkey.key, "modifiers": config.hotkey.modifiers},
         "credentials": {
             "openrouter": _env_present("OPENROUTER_API_KEY"),
+            "groq": _env_present("GROQ_API_KEY"),
             "gnani": _env_present("GNANI_API"),
         },
         "latest_session": latest.model_dump() if latest else None,
@@ -262,11 +305,42 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+@app.exception_handler(RequestValidationError)
+async def safe_validation_error_handler(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Return validation errors without echoing submitted values or contexts.
+
+    Pydantic's default error details may include the original ``input`` value.
+    For credential requests that value can be an API key, so this handler only
+    returns the location, message and error type. It intentionally omits both
+    ``input`` and ``ctx`` for every request-validation error.
+    """
+    safe_errors: list[dict[str, object]] = []
+    for error in exc.errors():
+        location = list(error.get("loc", ()))
+        is_api_key_error = "api_key" in location
+        safe_errors.append(
+            {
+                "loc": location,
+                "msg": (
+                    "Invalid credential request."
+                    if is_api_key_error
+                    else str(error.get("msg", "Invalid request."))
+                ),
+                "type": str(error.get("type", "value_error")),
+            }
+        )
+
+    return JSONResponse(status_code=422, content={"detail": safe_errors})
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(LOCAL_FRONTEND_ORIGINS),
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
@@ -292,6 +366,7 @@ def health() -> HealthResponse:
         project_root=str(config.project_root),
         config_path=str(config.config_path),
         has_openrouter_key=_env_present("OPENROUTER_API_KEY"),
+        has_groq_key=_env_present("GROQ_API_KEY"),
         has_gnani_key=_env_present("GNANI_API"),
         git_available=shutil.which("git") is not None,
         arecord_available=shutil.which("arecord") is not None,
@@ -315,6 +390,7 @@ def put_config(update: ConfigUpdate) -> SafeConfig:
     mapping: list[tuple[str, str, str | int | float | bool]] = [
         ("llm", "provider", update.llm_provider),
         ("llm", "model", update.llm_model),
+        ("llm", "groq_model", update.llm_groq_model),
         ("llm", "temperature", update.llm_temperature),
         ("llm", "max_tokens", update.llm_max_tokens),
         ("llm", "timeout", update.llm_timeout),
@@ -347,6 +423,78 @@ def put_config(update: ConfigUpdate) -> SafeConfig:
             {"message": f"Updated {len(changed)} setting(s).", "changed": changed},
         )
     return _safe_config()
+
+
+def _publish_credentials_updated(provider_id: str, configured: bool) -> None:
+    """Broadcast safe credential metadata only (never key values)."""
+    log_event("credentials", "saved" if configured else "removed")
+    event_bus.publish(
+        "credentials_updated",
+        {
+            "message": f"Provider '{provider_id}' is now "
+            + ("configured." if configured else "not configured."),
+            "provider": provider_id,
+            "configured": configured,
+        },
+    )
+
+
+@app.get("/api/settings/providers", response_model=ProvidersResponse)
+def get_providers() -> ProvidersResponse:
+    """Safe provider metadata: presence flags only, never key values."""
+    config = load_config()
+    return ProvidersResponse(
+        providers=[
+            ProviderInfo(**item) for item in all_provider_metadata(config)
+        ],
+        selected_llm=config.llm.provider,
+    )
+
+
+@app.post(
+    "/api/settings/providers/credentials", response_model=ProviderCredentialResponse
+)
+def save_provider_credential(request: ProviderCredentialRequest) -> ProviderCredentialResponse:
+    try:
+        save_credential(request.provider, request.api_key)
+    except CredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _refresh_daemon_after_credentials_change()
+    _publish_credentials_updated(request.provider, True)
+    return ProviderCredentialResponse(
+        provider=ProviderInfo(**provider_metadata(request.provider))
+    )
+
+
+@app.delete(
+    "/api/settings/providers/credentials/{provider}",
+    response_model=ProviderCredentialResponse,
+)
+def delete_provider_credential(provider: str) -> ProviderCredentialResponse:
+    cleaned = provider.strip().lower()
+    if cleaned not in PROVIDERS:
+        raise HTTPException(status_code=404, detail="Unknown provider.")
+    try:
+        remove_credential(cleaned)
+    except CredentialError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _refresh_daemon_after_credentials_change()
+    _publish_credentials_updated(cleaned, False)
+    return ProviderCredentialResponse(
+        provider=ProviderInfo(**provider_metadata(cleaned))
+    )
+
+
+@app.post("/api/settings/providers/test", response_model=ProviderTestResult)
+def test_provider(request: ProviderTestRequest) -> ProviderTestResult:
+    config = load_config()
+    metadata = provider_metadata(request.provider, config)
+    model = metadata["model"] if metadata["kind"] == "llm" else None
+    try:
+        result = run_connection_test(request.provider, model)
+    except ConnectionTestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return ProviderTestResult(**result)
 
 
 @app.get("/api/git/context")

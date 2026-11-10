@@ -79,8 +79,30 @@ class BridgeApiTests(unittest.TestCase):
         self.assertNotIn("GNANI_API", response.text)
 
     def test_invalid_config_rejected(self) -> None:
-        response = self.client.put("/api/config", json={"llm_provider": "groq"})
+        response = self.client.put("/api/config", json={"llm_provider": "anthropic"})
         self.assertEqual(response.status_code, 422)
+
+    def test_groq_is_a_valid_config_provider(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rubberducky.ini"
+            path.write_text(
+                "[llm]\nprovider = openrouter\nmodel = vendor/x\n", encoding="utf-8"
+            )
+            from core.config import reset_config_cache
+            import core.config as config_module
+
+            previous = config_module.DEFAULT_CONFIG_PATH
+            config_module.DEFAULT_CONFIG_PATH = path
+            reset_config_cache()
+            try:
+                response = self.client.put(
+                    "/api/config", json={"llm_provider": "groq"}
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["llm"]["provider"], "groq")
+            finally:
+                config_module.DEFAULT_CONFIG_PATH = previous
+                reset_config_cache()
 
     def test_git_context(self) -> None:
         response = self.client.get("/api/git/context")

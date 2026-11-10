@@ -41,6 +41,7 @@ export interface HealthResponse {
   project_root: string;
   config_path: string;
   has_openrouter_key: boolean;
+  has_groq_key: boolean;
   has_gnani_key: boolean;
   git_available: boolean;
   arecord_available: boolean;
@@ -55,7 +56,7 @@ export interface StatusResponse {
   project_root: string;
   branch: string;
   hotkey: { key: string; modifiers: string };
-  credentials: { openrouter: boolean; gnani: boolean };
+  credentials: { openrouter: boolean; groq: boolean; gnani: boolean };
   latest_session: SessionRecord | null;
   last_diagnosis: string | null;
   session_count: number;
@@ -65,6 +66,7 @@ export interface SafeConfig {
   llm: {
     provider: string;
     model: string;
+    models: Record<string, string>;
     temperature: number;
     max_tokens: number;
     timeout: number;
@@ -93,6 +95,7 @@ export interface SafeConfig {
 export interface ConfigUpdate {
   llm_provider?: string;
   llm_model?: string;
+  llm_groq_model?: string;
   llm_temperature?: number;
   llm_max_tokens?: number;
   llm_timeout?: number;
@@ -105,6 +108,37 @@ export interface ConfigUpdate {
   hotkey_modifiers?: string;
   triage_device?: string;
   triage_lazy_load?: boolean;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  kind: "llm" | "speech";
+  description: string;
+  env_var: string;
+  configured: boolean;
+  selected: boolean | null;
+  capabilities: string[];
+  model: string | null;
+  default_model: string | null;
+  connection_test_supported: boolean;
+}
+
+export interface ProvidersResponse {
+  providers: ProviderInfo[];
+  selected_llm: string;
+}
+
+export interface ProviderCredentialResponse {
+  provider: ProviderInfo;
+}
+
+export interface ProviderTestResult {
+  provider: string;
+  ok: boolean;
+  message: string;
+  model: string | null;
+  model_ok: boolean | null;
 }
 
 export interface GitCommit {

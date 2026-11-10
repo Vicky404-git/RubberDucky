@@ -3,11 +3,12 @@ import { Link } from "react-router-dom";
 import {
   Cpu,
   FolderCog,
-  KeyRound,
   Keyboard,
+  Mic,
   Save,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Terminal,
   Volume2,
 } from "lucide-react";
@@ -17,12 +18,12 @@ import { Badge } from "../components/ui/Badge";
 import { Button } from "../components/ui/Button";
 import { Field, Input, Select, Toggle } from "../components/ui/Field";
 import { ErrorBanner, Skeleton } from "../components/ui/States";
+import { ProviderCard } from "../components/Settings/ProviderCard";
+import { api } from "../services/api";
 import { useAppStore } from "../stores/appStore";
 import type { ConfigUpdate, SafeConfig } from "../types/api";
 
 interface FormState {
-  llmProvider: string;
-  llmModel: string;
   llmTemperature: number;
   llmMaxTokens: number;
   llmTimeout: number;
@@ -39,8 +40,6 @@ interface FormState {
 
 function toForm(config: SafeConfig): FormState {
   return {
-    llmProvider: config.llm.provider,
-    llmModel: config.llm.model,
     llmTemperature: config.llm.temperature,
     llmMaxTokens: config.llm.max_tokens,
     llmTimeout: config.llm.timeout,
@@ -58,8 +57,6 @@ function toForm(config: SafeConfig): FormState {
 
 function changes(config: SafeConfig, form: FormState): ConfigUpdate {
   const update: ConfigUpdate = {};
-  if (form.llmProvider !== config.llm.provider) update.llm_provider = form.llmProvider;
-  if (form.llmModel !== config.llm.model) update.llm_model = form.llmModel;
   if (form.llmTemperature !== config.llm.temperature) update.llm_temperature = form.llmTemperature;
   if (form.llmMaxTokens !== config.llm.max_tokens) update.llm_max_tokens = form.llmMaxTokens;
   if (form.llmTimeout !== config.llm.timeout) update.llm_timeout = form.llmTimeout;
@@ -77,20 +74,34 @@ function changes(config: SafeConfig, form: FormState): ConfigUpdate {
 
 export function Settings() {
   const config = useAppStore((state) => state.config);
-  const health = useAppStore((state) => state.health);
   const loading = useAppStore((state) => state.loading);
   const error = useAppStore((state) => state.errors.config);
   const refreshConfig = useAppStore((state) => state.refreshConfig);
   const saveConfig = useAppStore((state) => state.saveConfig);
 
+  const providers = useAppStore((state) => state.providers);
+  const selectedLlm = useAppStore((state) => state.selectedLlm);
+  const providersLoading = useAppStore((state) => state.loading.providers);
+  const providersError = useAppStore((state) => state.errors.providers);
+  const refreshProviders = useAppStore((state) => state.refreshProviders);
+  const saveProviderKey = useAppStore((state) => state.saveProviderKey);
+  const removeProviderKey = useAppStore((state) => state.removeProviderKey);
+  const selectLlmProvider = useAppStore((state) => state.selectLlmProvider);
+  const saveProviderModel = useAppStore((state) => state.saveProviderModel);
+
   const [form, setForm] = useState<FormState | null>(null);
 
   useEffect(() => {
     void refreshConfig();
-  }, [refreshConfig]);
+    void refreshProviders();
+  }, [refreshConfig, refreshProviders]);
 
   useEffect(() => {
-    if (config) setForm(toForm(config));
+    // Initialize the form once. Provider-key/model actions refresh `config` too;
+    // replacing the whole form on every refresh would erase unrelated edits.
+    if (config) {
+      setForm((current) => current ?? toForm(config));
+    }
   }, [config]);
 
   const update = useMemo(
@@ -102,6 +113,10 @@ export function Settings() {
   const set = <K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => (current ? { ...current, [key]: value } : current));
   };
+
+  const llmProviders = providers.filter((provider) => provider.kind === "llm");
+  const speechProviders = providers.filter((provider) => provider.kind === "speech");
+  const actionBusy = loading.action || providersLoading;
 
   if (!config || !form) {
     return (
@@ -122,7 +137,7 @@ export function Settings() {
       <PageHeader
         eyebrow="Configuration"
         title="Settings"
-        description="Edits are written to the existing rubberducky.ini without replacing unmanaged keys, comments or secrets. Only changed fields are sent."
+        description="Bring your own keys — credentials are stored by the local Python backend in .env, never in the browser. Other edits are written to rubberducky.ini without replacing unmanaged keys, comments or secrets. Only changed fields are sent."
         actions={
           <>
             <Badge tone={dirty ? "duck" : "neutral"}>
@@ -143,6 +158,65 @@ export function Settings() {
 
       {error ? <ErrorBanner message={error} onRetry={() => void refreshConfig()} /> : null}
 
+      <Panel
+        title={
+          <span className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+            <Sparkles className="h-4 w-4 text-duck-300" aria-hidden /> AI Provider Configuration
+          </span>
+        }
+        subtitle={`Bring your own key. Exactly one LLM provider is active at a time — currently ${selectedLlm}. Switching takes effect immediately, without restarting the bridge.`}
+      >
+        {providersError ? (
+          <ErrorBanner message={providersError} onRetry={() => void refreshProviders()} />
+        ) : null}
+        {providersLoading && llmProviders.length === 0 ? (
+          <div className="grid gap-4 xl:grid-cols-2">
+            <Skeleton className="h-80 w-full" />
+            <Skeleton className="h-80 w-full" />
+          </div>
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {llmProviders.map((provider) => (
+              <ProviderCard
+                key={provider.id}
+                provider={provider}
+                busy={actionBusy}
+                onSelectProvider={() => void selectLlmProvider(provider.id)}
+                onSaveKey={(apiKey) => saveProviderKey(provider.id, apiKey)}
+                onRemoveKey={() => removeProviderKey(provider.id)}
+                onSaveModel={(model) => saveProviderModel(provider.id, model)}
+                onTestConnection={() => api.testProvider(provider.id)}
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+
+      <Panel
+        title={
+          <span className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+            <Mic className="h-4 w-4 text-duck-300" aria-hidden /> Speech Provider Configuration
+          </span>
+        }
+        subtitle="Gnani credentials for voice capture and spoken responses."
+      >
+        {speechProviders.length === 0 ? (
+          <Skeleton className="h-64 w-full" />
+        ) : (
+          <div className="grid gap-4 xl:grid-cols-2">
+            {speechProviders.map((provider) => (
+              <ProviderCard
+                key={provider.id}
+                provider={provider}
+                busy={actionBusy}
+                onSaveKey={(apiKey) => saveProviderKey(provider.id, apiKey)}
+                onRemoveKey={() => removeProviderKey(provider.id)}
+              />
+            ))}
+          </div>
+        )}
+      </Panel>
+
       <div className="grid gap-5 lg:grid-cols-2">
         <Panel
           title={
@@ -150,60 +224,40 @@ export function Settings() {
               <SlidersHorizontal className="h-4 w-4 text-duck-300" aria-hidden /> Language model
             </span>
           }
-          subtitle="OpenRouter is the only provider implemented by the backend."
+          subtitle="Shared generation settings — the provider and model are managed per provider above."
         >
-          <div className="space-y-4">
-            <Field label="Provider" htmlFor="llm-provider">
-              <Select
-                id="llm-provider"
-                value={form.llmProvider}
-                onChange={(event) => set("llmProvider", event.target.value)}
-              >
-                <option value="openrouter">OpenRouter</option>
-              </Select>
-            </Field>
-            <Field label="Model" htmlFor="llm-model" hint="OpenRouter model id">
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Temperature" htmlFor="llm-temperature">
               <Input
-                id="llm-model"
-                value={form.llmModel}
-                onChange={(event) => set("llmModel", event.target.value)}
-                spellCheck={false}
-                className="font-mono text-xs"
+                id="llm-temperature"
+                type="number"
+                min={0}
+                max={2}
+                step={0.1}
+                value={form.llmTemperature}
+                onChange={(event) => set("llmTemperature", Number(event.target.value))}
               />
             </Field>
-            <div className="grid gap-4 sm:grid-cols-3">
-              <Field label="Temperature" htmlFor="llm-temperature">
-                <Input
-                  id="llm-temperature"
-                  type="number"
-                  min={0}
-                  max={2}
-                  step={0.1}
-                  value={form.llmTemperature}
-                  onChange={(event) => set("llmTemperature", Number(event.target.value))}
-                />
-              </Field>
-              <Field label="Max tokens" htmlFor="llm-tokens">
-                <Input
-                  id="llm-tokens"
-                  type="number"
-                  min={64}
-                  max={8192}
-                  value={form.llmMaxTokens}
-                  onChange={(event) => set("llmMaxTokens", Number(event.target.value))}
-                />
-              </Field>
-              <Field label="Timeout (s)" htmlFor="llm-timeout">
-                <Input
-                  id="llm-timeout"
-                  type="number"
-                  min={3}
-                  max={180}
-                  value={form.llmTimeout}
-                  onChange={(event) => set("llmTimeout", Number(event.target.value))}
-                />
-              </Field>
-            </div>
+            <Field label="Max tokens" htmlFor="llm-tokens">
+              <Input
+                id="llm-tokens"
+                type="number"
+                min={64}
+                max={8192}
+                value={form.llmMaxTokens}
+                onChange={(event) => set("llmMaxTokens", Number(event.target.value))}
+              />
+            </Field>
+            <Field label="Timeout (s)" htmlFor="llm-timeout">
+              <Input
+                id="llm-timeout"
+                type="number"
+                min={3}
+                max={180}
+                value={form.llmTimeout}
+                onChange={(event) => set("llmTimeout", Number(event.target.value))}
+              />
+            </Field>
           </div>
         </Panel>
 
@@ -366,36 +420,6 @@ export function Settings() {
               ))}
             </Select>
           </Field>
-        </Panel>
-
-        <Panel
-          title={
-            <span className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-              <KeyRound className="h-4 w-4 text-duck-300" aria-hidden /> Credentials
-            </span>
-          }
-          subtitle="Secrets stay in .env and are never sent to the browser."
-        >
-          <div className="space-y-2.5">
-            {[
-              { label: "GNANI_API", ready: Boolean(health?.has_gnani_key) },
-              { label: "OPENROUTER_API_KEY", ready: Boolean(health?.has_openrouter_key) },
-            ].map((item) => (
-              <div
-                key={item.label}
-                className="flex items-center justify-between rounded-xl border border-white/[0.06] bg-black/20 px-3.5 py-2.5"
-              >
-                <span className="font-mono text-[11px] text-zinc-400">{item.label}</span>
-                <Badge tone={item.ready ? "success" : "error"} dot>
-                  {item.ready ? "Configured" : "Missing"}
-                </Badge>
-              </div>
-            ))}
-            <p className="text-[11px] leading-relaxed text-zinc-600">
-              .env file: {config.paths.env_file_present ? "present" : "not found"}. Values are read
-              only by the Python bridge; the UI only receives presence booleans.
-            </p>
-          </div>
         </Panel>
 
         <Panel

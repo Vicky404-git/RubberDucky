@@ -291,11 +291,12 @@ Create your local `.env` file:
 cp .env.example .env
 ```
 
-Add your credentials:
+Add your own credentials (see the [BYOK section](#-bring-your-own-key-byok) for details), or enter them through the Settings page:
 
 ```env
-GNANI_API=YOUR_GNANI_API_KEY
-OPENROUTER_API_KEY=YOUR_OPENROUTER_API_KEY
+GNANI_API=your_gnani_key
+OPENROUTER_API_KEY=your_openrouter_key
+GROQ_API_KEY=your_groq_key
 ```
 
 Never commit `.env` or expose API keys in frontend code.
@@ -337,6 +338,46 @@ backup_count = 3
 ```
 
 The configuration can also be managed through the Settings page.
+
+---
+
+## 🔑 Bring Your Own Key (BYOK)
+
+RubberDucky does not ship with any AI credentials. You supply your own API keys, and all provider usage and billing belong to your own accounts.
+
+### Where to enter keys
+
+Open the web interface, go to **Settings → AI Provider Configuration** and **Settings → Speech Provider Configuration**. Each provider card offers a password-type input with a show/hide control, Save key, Remove key and (where supported) a real connection test. The Settings page is the recommended way to manage credentials; editing `.env` directly also works.
+
+### Supported providers
+
+| Provider | Kind | Environment variable | Purpose |
+| --- | --- | --- | --- |
+| OpenRouter | LLM | `OPENROUTER_API_KEY` | Incident diagnosis (configurable model) |
+| Groq | LLM | `GROQ_API_KEY` | Incident diagnosis (configurable model) |
+| Gnani | Speech | `GNANI_API` | Prisma STT and Timbre TTS (one shared credential) |
+
+- Exactly **one LLM provider** (OpenRouter or Groq) is active at a time. Switching in Settings updates the backend configuration and takes effect immediately — no bridge restart required.
+- Each LLM provider keeps its own model ID, editable on its provider card.
+- Both LLM providers use the same diagnosis pipeline, JSON response validation and error reporting. RubberDucky never silently falls back to another provider when a request fails.
+
+### How credentials are stored
+
+- Keys are saved by the local Python backend into the project-root `.env` file using atomic writes with restrictive `0600` permissions. Unrelated environment variables and comments in the file are preserved.
+- `.env` is **local plaintext protected by filesystem permissions, not encrypted storage**. Anyone with access to your user account or backups can read it.
+- Saved keys are also applied to the running bridge immediately, so subsequent sessions use them without a restart. (Note: variables exported in your shell take precedence over `.env` on a fresh start, because `load_dotenv()` does not override existing environment variables.)
+- Removing a key clears both `.env` and the running process environment.
+- The backend returns only safe metadata (provider name, configured flag, selected flag, capabilities) — never the key itself, a masked version, or any recoverable representation.
+- Keys are never stored in the browser (no localStorage/sessionStorage), never placed in URLs, never persisted in React state beyond the transient input field, and never sent through WebSocket events.
+
+### Which services require credentials
+
+- **Diagnosis (LLM)**: OpenRouter or Groq — one of the two, depending on the selected provider.
+- **Speech (STT/TTS)**: Gnani — one credential currently enables both Prisma STT and Timbre TTS.
+
+### Connection tests
+
+The OpenRouter and Groq test buttons send a credentials-only request to the provider (key verification and model listing) — no repository context, transcripts or prompts are transmitted. Gnani has no safe credential-only check, so its card shows *Configured* rather than *Verified*; the speech pipeline itself verifies the key when a session runs.
 
 ---
 
@@ -468,8 +509,9 @@ The daemon requires X11. Native Wayland global-shortcut support is not currently
 RubberDucky is designed to keep repository inspection and application state local wherever possible.
 
 - The FastAPI bridge binds to `127.0.0.1`.
-- API keys remain in the Python process.
+- API keys remain in the Python process and the local `.env` file (plaintext, `0600` permissions).
 - The frontend receives credential-presence information, not credential values.
+- Credential-writing endpoints are protected by the local host/origin security model.
 - Git operations are read-only.
 - Git context is bounded and passed through ignore and sensitive-data filtering.
 - Ignore Manager suggestions require explicit approval before being applied.

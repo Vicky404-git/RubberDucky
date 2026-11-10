@@ -86,6 +86,7 @@ function RuntimeStatus() {
   const connection = useAppStore((state) => state.connection);
   const status = useAppStore((state) => state.status);
   const health = useAppStore((state) => state.health);
+  const providers = useAppStore((state) => state.providers);
 
   const online = connection === "online";
   return (
@@ -110,8 +111,20 @@ function RuntimeStatus() {
       </div>
       <div className="flex items-center justify-between text-[11px]">
         <span className="text-zinc-500">Credentials</span>
-        <span className={cn(health?.has_gnani_key && health?.has_openrouter_key ? "text-zinc-300" : "text-amber-glow")}>
-          {health?.has_gnani_key && health?.has_openrouter_key ? "Ready" : "Incomplete"}
+        <span
+          className={cn(
+            health?.has_gnani_key &&
+              (providers.find((p) => p.kind === "llm" && p.selected)?.configured ??
+                health?.has_openrouter_key)
+              ? "text-zinc-300"
+              : "text-amber-glow",
+          )}
+        >
+          {health?.has_gnani_key &&
+          (providers.find((p) => p.kind === "llm" && p.selected)?.configured ??
+            health?.has_openrouter_key)
+            ? "Ready"
+            : "Incomplete"}
         </span>
       </div>
       {status ? (

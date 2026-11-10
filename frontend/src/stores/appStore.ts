@@ -16,6 +16,7 @@ import type {
   HealthResponse,
   IgnoreRules,
   LogEntry,
+  ProviderInfo,
   SafeConfig,
   SessionRecord,
   StatusResponse,
@@ -28,6 +29,7 @@ interface LoadingFlags {
   git: boolean;
   ignore: boolean;
   config: boolean;
+  providers: boolean;
   logs: boolean;
   action: boolean;
 }
@@ -37,6 +39,7 @@ interface ErrorFlags {
   git?: string;
   ignore?: string;
   config?: string;
+  providers?: string;
   logs?: string;
   session?: string;
 }
@@ -56,6 +59,8 @@ interface AppStore {
   health: HealthResponse | null;
   status: StatusResponse | null;
   config: SafeConfig | null;
+  providers: ProviderInfo[];
+  selectedLlm: string;
   sessions: SessionRecord[];
   latest: SessionRecord | null;
   git: GitContext | null;
@@ -79,12 +84,18 @@ interface AppStore {
   refreshStatus: () => Promise<void>;
   refreshSessions: () => Promise<void>;
   refreshConfig: () => Promise<void>;
+  refreshProviders: () => Promise<void>;
   refreshGit: () => Promise<void>;
   refreshIgnore: () => Promise<void>;
   refreshLogs: () => Promise<void>;
   startSession: () => Promise<SessionRecord | null>;
   retrySession: (sessionId: string) => Promise<SessionRecord | null>;
   saveConfig: (update: ConfigUpdate) => Promise<boolean>;
+  /** The API key is used only for the request; it is never persisted here. */
+  saveProviderKey: (provider: string, apiKey: string) => Promise<boolean>;
+  removeProviderKey: (provider: string) => Promise<boolean>;
+  selectLlmProvider: (provider: string) => Promise<boolean>;
+  saveProviderModel: (provider: string, model: string) => Promise<boolean>;
   applyIgnore: (patterns: string[], destination: "rubberducky" | "git") => Promise<boolean>;
   deleteAudio: (sessionId: string) => Promise<void>;
   setAudio: (audio: AudioRequest | null) => void;
@@ -141,6 +152,8 @@ export const useAppStore = create<AppStore>()((set, get) => {
     health: null,
     status: null,
     config: null,
+    providers: [],
+    selectedLlm: "openrouter",
     sessions: [],
     latest: null,
     git: null,
@@ -160,6 +173,7 @@ export const useAppStore = create<AppStore>()((set, get) => {
       git: false,
       ignore: false,
       config: false,
+      providers: false,
       logs: false,
       action: false,
     },
@@ -272,6 +286,10 @@ export const useAppStore = create<AppStore>()((set, get) => {
       });
 
       if (event.type === "config_updated") void get().refreshConfig();
+      if (event.type === "credentials_updated") {
+        void get().refreshProviders();
+        void get().refreshStatus();
+      }
       if (event.type === "ignore_updated") void get().refreshIgnore();
       if (event.session_id) scheduleRefresh();
     },
@@ -323,6 +341,26 @@ export const useAppStore = create<AppStore>()((set, get) => {
         set((state) => ({ errors: { ...state.errors, config: messageOf(error) } }));
       } finally {
         set((state) => ({ loading: { ...state.loading, config: false } }));
+      }
+    },
+
+    refreshProviders: async () => {
+      set((state) => ({
+        loading: { ...state.loading, providers: true },
+        errors: { ...state.errors, providers: undefined },
+      }));
+      try {
+        const response = await api.providers();
+        set({
+          providers: response.providers,
+          selectedLlm: response.selected_llm,
+        });
+      } catch (error) {
+        set((state) => ({
+          errors: { ...state.errors, providers: messageOf(error) },
+        }));
+      } finally {
+        set((state) => ({ loading: { ...state.loading, providers: false } }));
       }
     },
 
@@ -446,6 +484,117 @@ export const useAppStore = create<AppStore>()((set, get) => {
       } catch (error) {
         set((state) => ({
           errors: { ...state.errors, config: messageOf(error) },
+          notice: { kind: "error", message: messageOf(error) },
+        }));
+        return false;
+      } finally {
+        set((state) => ({ loading: { ...state.loading, action: false } }));
+      }
+    },
+
+    saveProviderKey: async (provider, apiKey) => {
+      // The key exists only in this closure and the request body.
+      // It is never written to the store, storage or logs.
+      set((state) => ({
+        loading: { ...state.loading, action: true },
+        errors: { ...state.errors, providers: undefined },
+      }));
+      try {
+        await api.saveProviderCredential(provider, apiKey);
+        const response = await api.providers();
+        set({
+          providers: response.providers,
+          selectedLlm: response.selected_llm,
+          notice: { kind: "success", message: "API key configured ✓" },
+        });
+        void get().refreshStatus();
+        return true;
+      } catch (error) {
+        set((state) => ({
+          errors: { ...state.errors, providers: messageOf(error) },
+          notice: { kind: "error", message: messageOf(error) },
+        }));
+        return false;
+      } finally {
+        set((state) => ({ loading: { ...state.loading, action: false } }));
+      }
+    },
+
+    removeProviderKey: async (provider) => {
+      set((state) => ({
+        loading: { ...state.loading, action: true },
+        errors: { ...state.errors, providers: undefined },
+      }));
+      try {
+        await api.removeProviderCredential(provider);
+        const response = await api.providers();
+        set({
+          providers: response.providers,
+          selectedLlm: response.selected_llm,
+          notice: { kind: "info", message: "API key removed." },
+        });
+        void get().refreshStatus();
+        return true;
+      } catch (error) {
+        set((state) => ({
+          errors: { ...state.errors, providers: messageOf(error) },
+          notice: { kind: "error", message: messageOf(error) },
+        }));
+        return false;
+      } finally {
+        set((state) => ({ loading: { ...state.loading, action: false } }));
+      }
+    },
+
+    selectLlmProvider: async (provider) => {
+      set((state) => ({
+        loading: { ...state.loading, action: true },
+        errors: { ...state.errors, providers: undefined },
+      }));
+      try {
+        await api.updateConfig({ llm_provider: provider });
+        const [config, providers] = await Promise.all([
+          api.config(),
+          api.providers(),
+        ]);
+        set({
+          config,
+          providers: providers.providers,
+          selectedLlm: providers.selected_llm,
+          notice: { kind: "success", message: `${provider} is now the active provider.` },
+        });
+        return true;
+      } catch (error) {
+        set((state) => ({
+          errors: { ...state.errors, providers: messageOf(error) },
+          notice: { kind: "error", message: messageOf(error) },
+        }));
+        return false;
+      } finally {
+        set((state) => ({ loading: { ...state.loading, action: false } }));
+      }
+    },
+
+    saveProviderModel: async (provider, model) => {
+      set((state) => ({
+        loading: { ...state.loading, action: true },
+        errors: { ...state.errors, providers: undefined },
+      }));
+      try {
+        const update: ConfigUpdate =
+          provider === "groq" ? { llm_groq_model: model } : { llm_model: model };
+        const config = await api.updateConfig(update);
+        const providers = await api.providers();
+        set({
+          config,
+          providers: providers.providers,
+          selectedLlm: providers.selected_llm,
+          notice: { kind: "success", message: `${provider} model saved.` },
+        });
+        return true;
+      } catch (error) {
+        set((state) => ({
+          errors: { ...state.errors, providers: messageOf(error) },
           notice: { kind: "error", message: messageOf(error) },
         }));
         return false;

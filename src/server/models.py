@@ -5,6 +5,8 @@ from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from core.providers import PROVIDERS, llm_provider_ids
+
 SessionStatus = Literal[
     "idle",
     "listening",
@@ -52,6 +54,7 @@ class HealthResponse(BaseModel):
     project_root: str
     config_path: str
     has_openrouter_key: bool
+    has_groq_key: bool
     has_gnani_key: bool
     git_available: bool
     arecord_available: bool
@@ -72,6 +75,7 @@ class SafeConfig(BaseModel):
 class ConfigUpdate(BaseModel):
     llm_provider: Optional[str] = None
     llm_model: Optional[str] = None
+    llm_groq_model: Optional[str] = None
     llm_temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     llm_max_tokens: Optional[int] = Field(default=None, ge=64, le=8192)
     llm_timeout: Optional[int] = Field(default=None, ge=3, le=180)
@@ -90,11 +94,14 @@ class ConfigUpdate(BaseModel):
     def _provider(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
             return value
-        if value.strip().lower() != "openrouter":
-            raise ValueError("Only the OpenRouter provider is supported by the backend.")
-        return "openrouter"
+        cleaned = value.strip().lower()
+        if cleaned not in llm_provider_ids():
+            raise ValueError(
+                "Supported LLM providers: " + ", ".join(llm_provider_ids()) + "."
+            )
+        return cleaned
 
-    @field_validator("llm_model", "hotkey_key")
+    @field_validator("llm_model", "llm_groq_model", "hotkey_key")
     @classmethod
     def _single_line(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -191,3 +198,83 @@ class StartSessionRequest(BaseModel):
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", value.strip()):
             raise ValueError("Invalid Docker container name.")
         return value.strip()
+
+
+class ProviderInfo(BaseModel):
+    """Safe provider metadata; never contains a key value or masked key."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    name: str
+    kind: Literal["llm", "speech"]
+    description: str
+    env_var: str
+    configured: bool
+    selected: Optional[bool] = None
+    capabilities: list[str]
+    model: Optional[str] = None
+    default_model: Optional[str] = None
+    connection_test_supported: bool
+
+
+class ProvidersResponse(BaseModel):
+    providers: list[ProviderInfo]
+    selected_llm: str
+
+
+class ProviderCredentialRequest(BaseModel):
+    provider: str
+    # The secret value; validated against the provider allowlist and never
+    # logged, echoed, or included in any response.
+    api_key: str = Field(min_length=1, max_length=512)
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in PROVIDERS:
+            raise ValueError(
+                "Unknown provider. Supported providers: " + ", ".join(PROVIDERS) + "."
+            )
+        return cleaned
+
+    @field_validator("api_key")
+    @classmethod
+    def _api_key(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("The API key cannot be empty.")
+        if any(character in cleaned for character in "\n\r\t\x00"):
+            raise ValueError("The API key must be a single line.")
+        return cleaned
+
+
+class ProviderCredentialResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: ProviderInfo
+
+
+class ProviderTestRequest(BaseModel):
+    provider: str
+
+    @field_validator("provider")
+    @classmethod
+    def _provider(cls, value: str) -> str:
+        cleaned = value.strip().lower()
+        if cleaned not in PROVIDERS:
+            raise ValueError(
+                "Unknown provider. Supported providers: " + ", ".join(PROVIDERS) + "."
+            )
+        return cleaned
+
+
+class ProviderTestResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    ok: bool
+    message: str
+    model: Optional[str] = None
+    model_ok: Optional[bool] = None

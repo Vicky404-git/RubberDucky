@@ -1,8 +1,9 @@
-"""Shared OpenRouter client and structured LLM failures.
+"""Shared multi-provider LLM client and structured LLM failures.
 
 Both incident diagnosis and ignore-pattern suggestions use this module so the
 base URL, credentials, timeout, retry policy, and model settings are defined
-once. Error classification is typed; callers must never branch on message text.
+once per provider through the registry in ``core.providers``. Error
+classification is typed; callers must never branch on message text.
 """
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from openai import (
 
 from core.config import AppConfig, load_config
 from core.debuglog import log_event
+from core.providers import ProviderSpec, get_provider
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RETRIES = 0
@@ -72,96 +74,108 @@ class LLMError(Exception):
         return payload
 
 
-def get_api_key() -> str | None:
-    """Return the OpenRouter key from the environment, never from config."""
-    value = os.getenv("OPENROUTER_API_KEY", "").strip()
+def _provider_spec(provider_id: str) -> ProviderSpec:
+    spec = get_provider(provider_id)
+    if spec is None or spec.kind != "llm":
+        raise LLMError(
+            LLMErrorCode.UNSUPPORTED_PROVIDER,
+            f"The '{provider_id}' LLM provider is not supported. "
+            "Update the provider in Settings.",
+            retryable=False,
+        )
+    return spec
+
+
+def get_api_key(provider_id: str | None = None) -> str | None:
+    """Return the provider's key from the environment, never from config."""
+    provider = provider_id or load_config().llm.provider
+    spec = _provider_spec(provider)
+    value = os.getenv(spec.env_var, "").strip()
     return value or None
 
 
 def build_client(config: AppConfig | None = None) -> OpenAI:
-    """Build the one OpenRouter client configuration used by the app."""
+    """Build the OpenAI-compatible client for the selected provider."""
     cfg = config or load_config()
-    if cfg.llm.provider != "openrouter":
-        raise LLMError(
-            LLMErrorCode.UNSUPPORTED_PROVIDER,
-            "Only the OpenRouter provider is supported. Update rubberducky.ini.",
-            retryable=False,
-        )
-    api_key = get_api_key()
+    spec = _provider_spec(cfg.llm.provider)
+    api_key = get_api_key(spec.id)
     if not api_key:
         raise LLMError(
             LLMErrorCode.MISSING_CREDENTIALS,
-            "OPENROUTER_API_KEY is not configured. Add it to .env and restart the bridge.",
+            f"{spec.name} is selected but {spec.env_var} is not configured. "
+            "Add the key in Settings or .env and retry.",
             retryable=False,
         )
     return OpenAI(
-        base_url=OPENROUTER_BASE_URL,
+        base_url=spec.base_url,
         api_key=api_key,
         timeout=float(cfg.llm.timeout),
         max_retries=MAX_RETRIES,
     )
 
 
-def _status_error(status_code: int) -> LLMError:
+def _status_error(status_code: int, spec: ProviderSpec) -> LLMError:
     if status_code == 401:
         return LLMError(
             LLMErrorCode.AUTHENTICATION_ERROR,
-            "OpenRouter rejected the API key (HTTP 401). Check OPENROUTER_API_KEY and restart the bridge.",
+            f"{spec.name} rejected the API key (HTTP 401). "
+            f"Check {spec.env_var} in Settings.",
             retryable=False,
             status_code=status_code,
         )
     if status_code == 402:
         return LLMError(
             LLMErrorCode.PAYMENT_REQUIRED,
-            "OpenRouter requires credits or payment (HTTP 402). Add credits or choose another model.",
+            f"{spec.name} requires credits or payment (HTTP 402). "
+            "Add credits or choose another model.",
             retryable=False,
             status_code=status_code,
         )
     if status_code == 429:
         return LLMError(
             LLMErrorCode.RATE_LIMITED,
-            "OpenRouter returned HTTP 429 (rate limited). Wait a moment, then retry.",
+            f"{spec.name} returned HTTP 429 (rate limited). Wait a moment, then retry.",
             retryable=True,
             status_code=status_code,
         )
     if status_code >= 500:
         return LLMError(
             LLMErrorCode.SERVER_ERROR,
-            f"OpenRouter is temporarily unavailable (HTTP {status_code}). Retry the session.",
+            f"{spec.name} is temporarily unavailable (HTTP {status_code}). Retry the session.",
             retryable=True,
             status_code=status_code,
         )
     return LLMError(
         LLMErrorCode.HTTP_ERROR,
-        f"OpenRouter returned HTTP {status_code}. Check the configured model or retry.",
+        f"{spec.name} returned HTTP {status_code}. Check the configured model or retry.",
         retryable=status_code in {408, 409, 425},
         status_code=status_code,
     )
 
 
-def _raise_mapped(exc: Exception, started: float) -> None:
+def _raise_mapped(exc: Exception, started: float, spec: ProviderSpec) -> None:
     elapsed = (time.perf_counter() - started) * 1000
     if isinstance(exc, LLMError):
         raise exc
     if isinstance(exc, RateLimitError):
-        error = _status_error(429)
+        error = _status_error(429, spec)
         log_event("llm", "rate_limited", level="warning", duration_ms=elapsed, code=429)
     elif isinstance(exc, APITimeoutError):
         error = LLMError(
             LLMErrorCode.TIMEOUT,
-            "The OpenRouter request timed out. Retry the session.",
+            f"The {spec.name} request timed out. Retry the session.",
             retryable=True,
         )
         log_event("llm", "request_timeout", level="warning", duration_ms=elapsed)
     elif isinstance(exc, APIConnectionError):
         error = LLMError(
             LLMErrorCode.CONNECTION_ERROR,
-            "Could not reach OpenRouter. Check your network connection.",
+            f"Could not reach {spec.name}. Check your network connection.",
             retryable=True,
         )
         log_event("llm", "connection_error", level="error", duration_ms=elapsed)
     elif isinstance(exc, APIStatusError):
-        error = _status_error(exc.status_code)
+        error = _status_error(exc.status_code, spec)
         log_event(
             "llm",
             "http_error",
@@ -172,7 +186,7 @@ def _raise_mapped(exc: Exception, started: float) -> None:
     else:
         error = LLMError(
             LLMErrorCode.UNEXPECTED_ERROR,
-            "An unexpected error occurred while contacting OpenRouter. Retry the session.",
+            f"An unexpected error occurred while contacting {spec.name}. Retry the session.",
             retryable=True,
         )
         log_event("llm", "unexpected_error", level="error", duration_ms=elapsed)
@@ -209,6 +223,30 @@ def extract_json_object(content: str | None) -> dict[str, Any]:
     return data
 
 
+def _create_completion(
+    active_client: OpenAI,
+    *,
+    model: str,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float,
+    max_tokens: int,
+    use_json_mode: bool,
+) -> Any:
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if use_json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+    return active_client.chat.completions.create(**kwargs)
+
+
 def complete_json(
     system_prompt: str,
     user_prompt: str,
@@ -219,24 +257,54 @@ def complete_json(
     temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> dict[str, Any]:
-    """Request a JSON object from OpenRouter or raise a structured LLMError."""
+    """Request a JSON object from the selected provider or raise a structured LLMError."""
     cfg = config or load_config()
+    spec = _provider_spec(cfg.llm.provider)
     active_client = client or build_client(cfg)
     started = time.perf_counter()
     log_event("llm", "request_started")
     try:
-        response = active_client.chat.completions.create(
+        response = _create_completion(
+            active_client,
             model=model or cfg.llm.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            response_format={"type": "json_object"},
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
             temperature=cfg.llm.temperature if temperature is None else temperature,
             max_tokens=cfg.llm.max_tokens if max_tokens is None else max_tokens,
+            use_json_mode=spec.json_mode,
         )
     except Exception as exc:
-        _raise_mapped(exc, started)
+        # Some models reject response_format JSON mode with HTTP 400 even
+        # though the provider supports it. Retry once without JSON mode — the
+        # shared prompt and fence-tolerant parser keep the contract. This
+        # never switches providers and never fabricates a response.
+        json_mode_rejected = (
+            spec.json_mode
+            and spec.json_mode_fallback
+            and isinstance(exc, APIStatusError)
+            and exc.status_code == 400
+        )
+        if json_mode_rejected:
+            log_event(
+                "llm",
+                "json_mode_disabled",
+                level="warning",
+                duration_ms=(time.perf_counter() - started) * 1000,
+            )
+            try:
+                response = _create_completion(
+                    active_client,
+                    model=model or cfg.llm.model,
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    temperature=cfg.llm.temperature if temperature is None else temperature,
+                    max_tokens=cfg.llm.max_tokens if max_tokens is None else max_tokens,
+                    use_json_mode=False,
+                )
+            except Exception as retry_exc:
+                _raise_mapped(retry_exc, started, spec)
+        else:
+            _raise_mapped(exc, started, spec)
 
     choices = getattr(response, "choices", None)
     if not choices:
@@ -248,7 +316,7 @@ def complete_json(
         )
         raise LLMError(
             LLMErrorCode.EMPTY_RESPONSE,
-            "OpenRouter returned no response choices. Retry the session.",
+            f"{spec.name} returned no response choices. Retry the session.",
             retryable=True,
         )
 

@@ -56,7 +56,17 @@ export function Overview() {
   const copy = ORB_COPY[orbState];
   const active = Boolean(status?.active) || orbState === "listening" || orbState === "processing";
   const canRetry = orbState === "error" && latest?.retryable;
-  const missingCredentials = health && (!health.has_gnani_key || !health.has_openrouter_key);
+  const selectedLlmProvider = useAppStore((state) => state.providers).find(
+    (provider) => provider.kind === "llm" && provider.selected,
+  );
+  const llmKeyMissing = selectedLlmProvider
+    ? !selectedLlmProvider.configured
+    : !health?.has_openrouter_key;
+  const missingCredentialNames = [
+    ...(!health?.has_gnani_key ? ["GNANI_API"] : []),
+    ...(llmKeyMissing ? [selectedLlmProvider?.env_var ?? "OPENROUTER_API_KEY"] : []),
+  ];
+  const missingCredentials = missingCredentialNames.length > 0;
   const currentIndex = stageIndex(stage);
 
   const handlePrimary = () => {
@@ -95,12 +105,11 @@ export function Overview() {
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-xl border border-amber-glow/20 bg-amber-glow/[0.055] px-4 py-3 text-xs text-amber-glow">
           <ShieldCheck className="h-4 w-4 shrink-0" aria-hidden />
           <span>
-            Credentials incomplete:{" "}
-            {!health?.has_gnani_key ? "GNANI_API missing" : null}
-            {!health?.has_gnani_key && !health?.has_openrouter_key ? " · " : null}
-            {!health?.has_openrouter_key ? "OPENROUTER_API_KEY missing" : null}. Add them to{" "}
-            <code className="rounded bg-black/30 px-1 py-0.5 font-mono">.env</code> and restart
-            the bridge.
+            Credentials incomplete: {missingCredentialNames.join(" · ")} missing. Add them in{" "}
+            <Link to="/settings" className="underline underline-offset-2">
+              Settings
+            </Link>
+            .
           </span>
         </div>
       ) : null}

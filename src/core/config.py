@@ -6,12 +6,20 @@ variables remain the source of secrets; never put API keys in this file.
 from __future__ import annotations
 
 from configparser import ConfigParser, Error as ConfigError
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from core.providers import PROVIDERS, llm_provider_ids
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "rubberducky.ini"
+
+DEFAULT_LLM_MODELS: dict[str, str] = {
+    spec.id: spec.default_model or ""
+    for spec in PROVIDERS.values()
+    if spec.kind == "llm"
+}
 
 
 @dataclass(frozen=True)
@@ -24,10 +32,28 @@ class GitConfig:
 @dataclass(frozen=True)
 class LLMConfig:
     provider: str = "openrouter"
+    # Model of the *active* provider. Kept for pipeline compatibility;
+    # "model" maps to the OpenRouter (legacy) model key in rubberducky.ini.
     model: str = "liquid/lfm-3-1.7b:free"
+    # Per-provider model ids so each provider keeps its own selection.
+    models: dict[str, str] = field(default_factory=dict)
     temperature: float = 0.1
     max_tokens: int = 700
     timeout: int = 25
+
+    def model_for(self, provider: str) -> str:
+        return self.models.get(provider, DEFAULT_LLM_MODELS.get(provider, ""))
+
+    def __post_init__(self) -> None:
+        if not self.models:
+            object.__setattr__(
+                self,
+                "models",
+                {
+                    provider: DEFAULT_LLM_MODELS[provider]
+                    for provider in llm_provider_ids()
+                },
+            )
 
 
 @dataclass(frozen=True)
@@ -111,12 +137,21 @@ def load_config(path: str | Path | None = None, *, reload: bool = False) -> AppC
 
     root = config_path.parent
     provider = parser.get("llm", "provider", fallback="openrouter").strip().lower()
-    if provider != "openrouter":
+    if provider not in llm_provider_ids():
         print(f"Config warning: unsupported provider '{provider}', using openrouter.")
         provider = "openrouter"
 
     key = parser.get("hotkey", "key", fallback="v").strip() or "v"
     modifiers = parser.get("hotkey", "modifiers", fallback="Mod4+Alt").strip() or "Mod4+Alt"
+
+    models: dict[str, str] = {}
+    for provider_id in llm_provider_ids():
+        option = "model" if provider_id == "openrouter" else f"{provider_id}_model"
+        default = DEFAULT_LLM_MODELS[provider_id]
+        models[provider_id] = (
+            parser.get("llm", option, fallback=default).strip() or default
+        )
+    active_model = models[provider]
 
     _cached_config = AppConfig(
         project_root=root,
@@ -128,7 +163,8 @@ def load_config(path: str | Path | None = None, *, reload: bool = False) -> AppC
         ),
         llm=LLMConfig(
             provider=provider,
-            model=parser.get("llm", "model", fallback="liquid/lfm-3-1.7b:free").strip() or "liquid/lfm-3-1.7b:free",
+            model=active_model,
+            models=dict(models),
             temperature=_bounded_float(parser, "llm", "temperature", 0.1, 0.0, 2.0),
             max_tokens=_bounded_int(parser, "llm", "max_tokens", 700, 64, 8192),
             timeout=_bounded_int(parser, "llm", "timeout", 25, 3, 180),

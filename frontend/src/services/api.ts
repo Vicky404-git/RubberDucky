@@ -7,6 +7,9 @@ import type {
   IgnoreRules,
   LogsResponse,
   PlaybackPhase,
+  ProviderCredentialResponse,
+  ProviderTestResult,
+  ProvidersResponse,
   SafeConfig,
   SessionRecord,
   SessionsResponse,
@@ -62,6 +65,24 @@ export const api = {
   config: () => request<SafeConfig>("/api/config"),
   updateConfig: (update: ConfigUpdate) =>
     request<SafeConfig>("/api/config", { method: "PUT", body: JSON.stringify(update) }),
+  providers: () => request<ProvidersResponse>("/api/settings/providers"),
+  // The API key travels only in the POST body over the local connection and
+  // is never stored, logged or echoed back by the backend.
+  saveProviderCredential: (provider: string, apiKey: string) =>
+    request<ProviderCredentialResponse>("/api/settings/providers/credentials", {
+      method: "POST",
+      body: JSON.stringify({ provider, api_key: apiKey }),
+    }),
+  removeProviderCredential: (provider: string) =>
+    request<ProviderCredentialResponse>(
+      `/api/settings/providers/credentials/${encodeURIComponent(provider)}`,
+      { method: "DELETE" },
+    ),
+  testProvider: (provider: string) =>
+    request<ProviderTestResult>("/api/settings/providers/test", {
+      method: "POST",
+      body: JSON.stringify({ provider }),
+    }),
   sessions: (limit = 50) => request<SessionsResponse>(`/api/sessions?limit=${limit}`),
   session: (id: string) => request<SessionRecord>(`/api/sessions/${encodeURIComponent(id)}`),
   startSession: (dockerContainer?: string | null) =>
